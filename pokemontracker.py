@@ -41,8 +41,13 @@ st.sidebar.number_input(
 total_market = 0.0
 total_selling = 0.0
 
-# Calculate totals across all lots
+# Calculate totals across all lots (Lot-level + Individual cards)
 for lot_id, lot_data in st.session_state.app_data["lots"].items():
+    # Add bulk lot pricing
+    total_market += lot_data.get("lot_market_price", 0.0)
+    total_selling += lot_data.get("lot_selling_price", 0.0)
+    
+    # Add individual card pricing
     for card in lot_data.get("cards", []):
         total_market += card.get("Market Price") or 0.0
         total_selling += card.get("Current Price") or 0.0
@@ -72,7 +77,13 @@ new_lot_name = st.sidebar.text_input("New Lot Name")
 if st.sidebar.button("Create New Lot"):
     new_id = str(uuid.uuid4())
     default_name = new_lot_name if new_lot_name else f"Lot {len(st.session_state.app_data['lots']) + 1}"
-    st.session_state.app_data["lots"][new_id] = {"name": default_name, "cards": []}
+    # Initialize with the new lot-level pricing keys
+    st.session_state.app_data["lots"][new_id] = {
+        "name": default_name, 
+        "lot_market_price": 0.0,
+        "lot_selling_price": 0.0,
+        "cards": []
+    }
     save_data(st.session_state.app_data)
     st.rerun()
 
@@ -84,7 +95,6 @@ lot_ids = list(st.session_state.app_data["lots"].keys())
 if not lot_ids:
     st.info("👈 You don't have any lots yet. Create one in the sidebar to get started!")
 else:
-    # Create interactive tabs for each lot
     tabs = st.tabs([st.session_state.app_data["lots"][lid]["name"] for lid in lot_ids])
     
     for i, tab in enumerate(tabs):
@@ -94,26 +104,38 @@ else:
         with tab:
             col1, col2 = st.columns([3, 1])
             with col1:
-                # Lot renaming
                 new_name = st.text_input("Rename Lot", value=lot["name"], key=f"rename_{lot_id}")
                 if new_name != lot["name"]:
                     st.session_state.app_data["lots"][lot_id]["name"] = new_name
                     save_data(st.session_state.app_data)
                     st.rerun()
             with col2:
-                # Lot deletion
                 st.write("") 
                 st.write("")
                 if st.button("Delete This Lot", key=f"del_{lot_id}"):
                     del st.session_state.app_data["lots"][lot_id]
                     save_data(st.session_state.app_data)
                     st.rerun()
+            
+            st.divider()
 
-            st.markdown("### Spreadsheet Editor")
+            # --- NEW: LOT-LEVEL PRICING ---
+            st.markdown("### Bulk Lot Pricing")
+            st.caption("Set a price for the entire lot if you don't want to list individual cards. These values add directly to your overall totals in the sidebar.")
+            
+            bulk_col1, bulk_col2 = st.columns(2)
+            with bulk_col1:
+                lot_market = st.number_input("Entire Lot Market Price (\$)", min_value=0.0, value=float(lot.get("lot_market_price", 0.0)), key=f"lm_{lot_id}")
+            with bulk_col2:
+                lot_selling = st.number_input("Entire Lot Selling Price (\$)", min_value=0.0, value=float(lot.get("lot_selling_price", 0.0)), key=f"ls_{lot_id}")
+            
+            st.divider()
+
+            # --- INDIVIDUAL CARDS EDITOR ---
+            st.markdown("### Individual Cards Spreadsheet")
             st.caption("Scroll to the bottom of the table to add a new card row. Edit prices directly.")
             
-            # Setup dataframe safely for the editor
-            df = pd.DataFrame(lot["cards"])
+            df = pd.DataFrame(lot.get("cards", []))
             if df.empty:
                 df = pd.DataFrame({
                     "Card Name": pd.Series(dtype='str'),
@@ -123,10 +145,8 @@ else:
                     "Discount Date": pd.Series(dtype='datetime64[ns]')
                 })
             else:
-                # Convert string dates back to datetime for the editor widget
                 df["Discount Date"] = pd.to_datetime(df["Discount Date"]).dt.date
 
-            # Render the data editor (operates like Excel)
             edited_df = st.data_editor(
                 df,
                 num_rows="dynamic",
@@ -141,8 +161,13 @@ else:
                 }
             )
 
-            # Manual save button to commit edits to the JSON file
-            if st.button("Save Cards for this Lot", key=f"save_{lot_id}", type="primary"):
+            # Unified Save Button for both Bulk and Individual edits
+            if st.button("Save Changes for this Lot", key=f"save_{lot_id}", type="primary"):
+                # Save bulk prices
+                st.session_state.app_data["lots"][lot_id]["lot_market_price"] = lot_market
+                st.session_state.app_data["lots"][lot_id]["lot_selling_price"] = lot_selling
+                
+                # Save individual cards
                 records = edited_df.to_dict('records')
                 cleaned_records = []
                 for r in records:
@@ -151,20 +176,29 @@ else:
                         if pd.isna(v):
                             clean_r[k] = None
                         elif isinstance(v, pd.Timestamp) or hasattr(v, 'isoformat'):
-                            clean_r[k] = str(v)[:10] # Store date as string: YYYY-MM-DD
+                            clean_r[k] = str(v)[:10]
                         else:
                             clean_r[k] = v
                     cleaned_records.append(clean_r)
                     
                 st.session_state.app_data["lots"][lot_id]["cards"] = cleaned_records
                 save_data(st.session_state.app_data)
-                st.success("Cards saved successfully!")
+                st.success("Lot saved successfully!")
                 st.rerun()
                 
             st.divider()
             
             # Visual Representation & Generated Margins
             st.markdown("### Visual Representation & Margins")
+            
+            # Display Bulk Lot Metrics if populated
+            if lot_market > 0 or lot_selling > 0:
+                bulk_profit_pct = ((lot_selling - lot_market) / lot_market) * 100 if lot_market > 0 else 0.0
+                st.markdown(f"**📦 BULK LOT** | Market: \${lot_market:.2f} | Selling for: **\${lot_selling:.2f}** | **Profit Margin: {bulk_profit_pct:.1f}%**")
+                if not edited_df.empty and not pd.isna(edited_df.iloc[0].get("Card Name")):
+                    st.caption("*Plus the following individual cards:*")
+            
+            # Display Individual Card Metrics
             for _, row in edited_df.iterrows():
                 name = row.get("Card Name")
                 if pd.isna(name) or not name:
@@ -175,13 +209,11 @@ else:
                 c_price = row.get("Current Price") if pd.notna(row.get("Current Price")) else 0.0
                 d_date = row.get("Discount Date")
                 
-                # Percentage Math (Profit Margin against Market Price)
                 if m_price > 0:
                     profit_pct = ((c_price - m_price) / m_price) * 100
                 else:
                     profit_pct = 0.0
                     
-                # Strikethrough visual logic for discounted cards
                 if pd.notna(d_date) and o_price > c_price:
                     price_display = f"~~\\${o_price:.2f}~~ **\\${c_price:.2f}** *(Discounted on {d_date})*"
                 else:
